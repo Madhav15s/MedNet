@@ -47,6 +47,12 @@ class MedicalPredictor:
         """Initialize the medical predictor"""
         self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         
+        # Set random seeds for reproducibility
+        torch.manual_seed(42)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed(42)
+            torch.cuda.manual_seed_all(42)
+        
         # Load model
         checkpoint = torch.load(model_path, map_location=self.device)
         self.classes = checkpoint['classes']
@@ -68,6 +74,10 @@ class MedicalPredictor:
     
     def predict(self, image):
         """Predict medical condition from image"""
+        # Set deterministic behavior for consistent results
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+        
         # Preprocess image
         image_tensor = self.transform(image).unsqueeze(0).to(self.device)
         
@@ -76,7 +86,7 @@ class MedicalPredictor:
             output = self.model(image_tensor)
             probabilities = F.softmax(output, dim=1)
             predicted_class = torch.argmax(output, dim=1).item()
-            confidence = probabilities[0][predicted_class].item()
+            confidence = probabilities[0, predicted_class].item()
         
         # Get results
         prediction = self.classes[predicted_class]
@@ -93,17 +103,40 @@ class MedicalPredictor:
 @st.cache_resource
 def load_models():
     """Load all available medical models"""
-    models_dir = Path("models")
+    # Try different possible paths for models
+    possible_paths = [
+        Path("models"),
+        Path("../models"),
+        Path("app/models"),
+        Path(".") / "models"
+    ]
+    
+    models_dir = None
+    for path in possible_paths:
+        if path.exists():
+            models_dir = path
+            break
+    
     predictors = {}
     
-    if models_dir.exists():
-        for model_file in models_dir.glob("resnet_*.pth"):
+    if models_dir and models_dir.exists():
+        st.info(f"🔍 Looking for models in: {models_dir.absolute()}")
+        model_files = list(models_dir.glob("resnet_*.pth"))
+        
+        if not model_files:
+            st.error(f"❌ No model files found in {models_dir}")
+            return {}
+        
+        for model_file in model_files:
             medical_type = model_file.stem.replace("resnet_", "")
             try:
-                predictors[medical_type] = MedicalPredictor(model_file)
+                predictors[medical_type] = MedicalPredictor(str(model_file))
                 st.success(f"✅ Loaded {medical_type} model")
             except Exception as e:
                 st.error(f"❌ Failed to load {medical_type} model: {e}")
+    else:
+        st.error("❌ Models directory not found!")
+        st.info("💡 Make sure models are in the 'models/' directory")
     
     return predictors
 
@@ -169,12 +202,27 @@ def main():
         if st.button("🔍 Analyze Image", type="primary"):
             with st.spinner("Analyzing image..."):
                 try:
+                    # Basic image validation
+                    img_array = np.array(image)
+                    
+                    # Check if image is grayscale (common for medical images)
+                    if len(img_array.shape) == 2:
+                        st.warning("⚠️ **Note:** This appears to be a grayscale image. Make sure you've selected the correct medical imaging type.")
+                    elif len(img_array.shape) == 3 and img_array.shape[2] == 1:
+                        st.warning("⚠️ **Note:** This appears to be a grayscale image. Make sure you've selected the correct medical imaging type.")
+                    
                     # Get prediction
                     predictor = predictors[selected_type]
                     result = predictor.predict(image)
                     
                     # Display results
                     st.markdown("### 📊 Analysis Results")
+                    
+                    # Add warning about model-image mismatch
+                    if selected_type == 'brain_mri' and 'chest' in uploaded_file.name.lower():
+                        st.error("🚨 **Warning:** You selected Brain MRI but uploaded what appears to be a chest X-ray. Please select the correct imaging type for accurate results.")
+                    elif selected_type == 'chest_xray' and 'brain' in uploaded_file.name.lower():
+                        st.error("🚨 **Warning:** You selected Chest X-Ray but uploaded what appears to be a brain image. Please select the correct imaging type for accurate results.")
                     
                     # Metrics
                     col1, col2, col3 = st.columns(3)
@@ -213,8 +261,10 @@ def main():
                         with col1:
                             st.write(f"**{class_name}:**")
                         with col2:
-                            st.progress(prob)
-                            st.write(f"{prob:.2%}")
+                            # Convert to float to avoid progress bar issues
+                            prob_float = float(prob)
+                            st.progress(prob_float)
+                            st.write(f"{prob_float:.2%}")
                     
                     # Medical explanation
                     st.markdown("### 💬 Medical Analysis")
